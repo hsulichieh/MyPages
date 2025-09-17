@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>出勤計算 — 可輸入表單</title>
+<style>
+  :root{--red:#ffdddd;--ok:#e8f5e9;--muted:#6b7280;}
+  body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,"Noto Sans TC",sans-serif;margin:24px;color:#111827;}
+  h1{font-size:22px;margin:0 0 12px;}
+  .card{max-width:980px;margin:auto;border:1px solid #e5e7eb;border-radius:14px;padding:16px 18px;box-shadow:0 2px 10px rgba(0,0,0,.04);}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+  label{font-size:13px;color:#374151;display:block;margin-bottom:6px;}
+  input[type=time]{padding:8px 10px;font-size:15px;border:1px solid #d1d5db;border-radius:10px;}
+  button{padding:9px 14px;border-radius:12px;border:1px solid #111827;background:#111827;color:#fff;cursor:pointer}
+  button.secondary{background:#fff;color:#111827;border-color:#d1d5db}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .muted{color:var(--muted);font-size:12px}
+  table{border-collapse:collapse;width:100%;margin-top:16px}
+  th,td{border:1px solid #e5e7eb;padding:8px 10px;text-align:center;font-variant-numeric: tabular-nums;}
+  th{background:#f9fafb}
+  tr.warn td.start{background:var(--red)}
+  tr.warn td.end{background:var(--red)}
+  .right{display:flex;gap:8px;margin-left:auto}
+  .bar{display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:10px}
+  .badge{display:inline-block;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:999px;padding:4px 8px;font-size:12px;color:#374151}
+  @media print{button,.bar{display:none} body{margin:0} .card{border:none;box-shadow:none}}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>出勤計算（可輸入表單）</h1>
+    <div class="row">
+      <div>
+        <label for="start">上班時間（07:00–11:00 之間）</label>
+        <input id="start" type="time" value="07:00" step="300">
+      </div>
+      <div>
+        <label for="end">下班時間（16:00–20:00 之間）</label>
+        <input id="end" type="time" value="16:00" step="300">
+      </div>
+      <div class="right">
+        <button id="calc">計算</button>
+        <button id="add" class="secondary" title="加入下方表格">加入紀錄</button>
+        <button id="export" class="secondary" title="匯出 CSV">匯出 CSV</button>
+        <button id="clear" class="secondary" title="清除表格">清除</button>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:6px">
+      規則：<span class="badge">午休 12:00–13:00 扣除</span>
+      <span class="badge">早於 07:00 以 07:00 起算</span>
+      <span class="badge">晚於 20:00 以 20:00 截止</span>
+      <span class="badge">請假以 0.5 小時進位</span>
+    </div>
+
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th>上班時間</th>
+          <th>下班時間</th>
+          <th>總在場時數(含午休)</th>
+          <th>午休重疊(小時)</th>
+          <th>實際工時(小時)</th>
+          <th>原始請假時數</th>
+          <th>請假(0.5小時制)</th>
+          <th>備註</th>
+        </tr>
+      </thead>
+      <tbody id="body">
+        <!-- 動態列 -->
+      </tbody>
+    </table>
+
+    <div class="bar">
+      <div class="muted">提示：若上班晚於 11:00 或下班早於 16:00，該欄會以淡紅色標示。</div>
+      <div><button onclick="window.print()" class="secondary">列印</button></div>
+    </div>
+  </div>
+
+<script>
+function toMinutes(hhmm){
+  const [h,m] = hhmm.split(':').map(Number);
+  return h*60 + m;
+}
+function clampMinutes(mins, minV, maxV){
+  return Math.min(maxV, Math.max(minV, mins));
+}
+function overlap(a0,a1,b0,b1){ // minutes
+  const s = Math.max(a0,b0), e = Math.min(a1,b1);
+  return Math.max(0, e - s);
+}
+function ceilHalfHour(hours){
+  return Math.ceil(hours*2)/2;
+}
+
+function computeRow(hStart, hEnd){
+  // Bounds
+  const MIN_START = 7*60, MAX_END = 20*60;
+  const LUNCH0 = 12*60, LUNCH1 = 13*60;
+  const startMin = clampMinutes(toMinutes(hStart), MIN_START, 24*60); // clamp low
+  const endMin = clampMinutes(toMinutes(hEnd), 0, MAX_END);          // clamp high
+
+  // In-place hours within 07:00–20:00
+  const s = Math.max(startMin, MIN_START);
+  const e = Math.min(endMin,   MAX_END);
+  const inPlace = Math.max(0, e - s); // minutes
+  const lunchOverlap = overlap(s, e, LUNCH0, LUNCH1); // minutes
+
+  const totalHours = inPlace/60;
+  const lunchHours = lunchOverlap/60;
+  const actual = totalHours - lunchHours;
+  const leaveRaw = Math.max(0, +(8 - actual).toFixed(10)); // avoid fp residue
+  const leaveRounded = ceilHalfHour(leaveRaw);
+
+  const warnStart = (toMinutes(hStart) > 11*60);
+  const warnEnd   = (toMinutes(hEnd)   < 16*60);
+
+  let note = [];
+  if(warnStart) note.push("上班晚於11:00");
+  if(warnEnd)   note.push("下班早於16:00");
+
+  return {
+    start: hStart, end: hEnd,
+    totalHours: +totalHours.toFixed(6),
+    lunchHours: +lunchHours.toFixed(6),
+    actual: +actual.toFixed(6),
+    leaveRaw: +leaveRaw.toFixed(6),
+    leaveRounded: leaveRounded,
+    warnStart, warnEnd,
+    note: note.join("；")
+  };
+}
+
+function renderRow(result){
+  const tr = document.createElement('tr');
+  if(result.warnStart || result.warnEnd) tr.classList.add('warn');
+  tr.innerHTML = `
+    <td class="start" style="${result.warnStart?'background:#ffdddd':''}">${result.start}</td>
+    <td class="end" style="${result.warnEnd?'background:#ffdddd':''}">${result.end}</td>
+    <td>${result.totalHours}</td>
+    <td>${result.lunchHours}</td>
+    <td>${result.actual}</td>
+    <td>${result.leaveRaw}</td>
+    <td>${result.leaveRounded}</td>
+    <td>${result.note}</td>
+  `;
+  return tr;
+}
+
+function doCalc(previewOnly=false){
+  const hStart = document.getElementById('start').value || '07:00';
+  const hEnd   = document.getElementById('end').value || '16:00';
+  const res = computeRow(hStart, hEnd);
+
+  if(previewOnly){
+    const body = document.getElementById('body');
+    body.innerHTML = '';
+    body.appendChild(renderRow(res));
+  }else{
+    document.getElementById('body').appendChild(renderRow(res));
+  }
+}
+
+document.getElementById('calc').addEventListener('click', ()=>doCalc(true));
+document.getElementById('add').addEventListener('click', ()=>doCalc(false));
+document.getElementById('clear').addEventListener('click', ()=>{ document.getElementById('body').innerHTML=''; });
+
+// CSV export
+document.getElementById('export').addEventListener('click', ()=>{
+  const rows = [["上班時間","下班時間","總在場時數(含午休)","午休重疊(小時)","實際工時(小時)","原始請假時數","請假(0.5小時制)","備註"]];
+  document.querySelectorAll('#body tr').forEach(tr=>{
+    const cells = Array.from(tr.children).map(td=>td.textContent.replace(/,/g,''));
+    rows.push(cells);
+  });
+  const csv = rows.map(r=>r.join(",")).join("\\n");
+  const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = "出勤計算_匯出.csv"; a.click();
+  URL.revokeObjectURL(url);
+});
+
+// initial preview
+doCalc(true);
+</script>
+</body>
+</html>
